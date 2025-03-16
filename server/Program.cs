@@ -5,12 +5,17 @@ using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Claims;
 using System.IdentityModel.Tokens.Jwt;
+using server.Data;
+using Microsoft.EntityFrameworkCore; 
+using BCrypt.Net;
+
 
 var builder = WebApplication.CreateBuilder(args);
 var jwtSettings = builder.Configuration.GetSection("JwtSettings");
 string secretKey = jwtSettings["Key"] ?? throw new ArgumentNullException("JWT Key is missing from configuration.");
 var key = Encoding.UTF8.GetBytes(secretKey);
 
+//----------------------------------Allow access to send requests and responses from client-----------------------------
 
 builder.Services.AddCors(options =>
 {
@@ -26,7 +31,6 @@ builder.Services.AddCors(options =>
 
 // Add controllers to the app
 builder.Services.AddControllers();
-
 
 // Configure authentication
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -50,6 +54,10 @@ builder.Services.AddAuthorization();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+//Database Connecton
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
 var app = builder.Build();
 
 // Configure middleware
@@ -58,33 +66,38 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+
 app.UseCors("AllowFrontend");
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
+app.MapControllers();
 
-// 🔹 **Login Endpoint to Generate JWT Token**
+
 var users = new List<User>(); // ✅ In-memory user list
 
 
 // ✅ Register a new user
-app.MapPost("/api/auth/register", ([FromBody] User newUser) =>
+app.MapPost("/api/auth/register", async (AppDbContext db, [FromBody] User newUser) =>
 {
-    if (users.Any(u => u.Username == newUser.Username))
+    if (await db.Users.AnyAsync(u => u.Username == newUser.Username))
     {
         return Results.BadRequest(new { message = "Username already exists" });
     }
 
-    users.Add(newUser);
+    newUser.Password = BCrypt.Net.BCrypt.HashPassword(newUser.Password); // Hash password
+    db.Users.Add(newUser);
+    await db.SaveChangesAsync();
+
     return Results.Ok(new { message = "Registration successful" });
-})
-.Accepts<User>("application/json");
+});
+
 
 // ✅ Login & Generate JWT Token
-app.MapPost("/api/auth/login", ([FromBody] UserCredentials credentials) =>
+app.MapPost("/api/auth/login", async (AppDbContext db, [FromBody] UserCredentials credentials) =>
 {
-    var user = users.FirstOrDefault(u => u.Username == credentials.Username && u.Password == credentials.Password);
-    if (user == null)
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Username == credentials.Username);
+    if (user == null || !BCrypt.Net.BCrypt.Verify(credentials.Password, user.Password))
     {
         return Results.Unauthorized();
     }
@@ -93,10 +106,7 @@ app.MapPost("/api/auth/login", ([FromBody] UserCredentials credentials) =>
     var tokenHandler = new JwtSecurityTokenHandler();
     var tokenDescriptor = new SecurityTokenDescriptor
     {
-        Subject = new ClaimsIdentity(new[]
-        {
-            new Claim(ClaimTypes.Name, credentials.Username)
-        }),
+        Subject = new ClaimsIdentity(new[] { new Claim(ClaimTypes.Name, credentials.Username) }),
         Expires = DateTime.UtcNow.AddMinutes(60),
         Issuer = jwtSettings["Issuer"],
         Audience = jwtSettings["Audience"],
@@ -105,8 +115,8 @@ app.MapPost("/api/auth/login", ([FromBody] UserCredentials credentials) =>
 
     var token = tokenHandler.CreateToken(tokenDescriptor);
     return Results.Ok(new { Token = tokenHandler.WriteToken(token) });
-})
-.Accepts<UserCredentials>("application/json");
+});
+
 
 // ✅ Protected Route Example (Requires JWT)
 app.MapGet("/api/protected", (ClaimsPrincipal user) =>
@@ -114,6 +124,16 @@ app.MapGet("/api/protected", (ClaimsPrincipal user) =>
     var username = user.Identity?.Name;
     return Results.Ok(new { message = $"Hello {username}, you accessed a protected route!" });
 }).RequireAuthorization();
+
+app.MapGet("/", () =>
+{
+    return Results.Ok("Hello, Client! This is a response from the server.");
+});
+
+app.MapGet("/api/users", () => Results.Ok(users));
+
+
+
 app.Run();
 
 // 🔹 **User Credentials Model**

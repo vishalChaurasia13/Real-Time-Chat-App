@@ -1,6 +1,13 @@
+using System.ComponentModel.DataAnnotations;
+
 public class User
 {
+    [Key]
     public int Id { get; set; }
+    
+    [Required]
     public string Username { get; set; } = string.Empty;
-    public string Password { get; set; } = string.Empty; // Store hashed password in a real app
+    
+    [Required]
+    public string Password { get; set; } = string.Empty; // Store hashed password
 }
